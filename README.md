@@ -1,30 +1,29 @@
-# Greece House Sales Trends — Streamlit App
+# Greece House Sales Trends — Streamlit App (Built-in years)
 
-## What it does
-- Upload an Excel with house sales
-- Choose aggregation: **Month / Quarter / Year**
-- Computes:
-  - **# of sales**
-  - **Total traded surface (sqm)** (main area, optionally main+aux)
-  - **Old/New mix** with dynamic bucket:  
-    - `pre_1990` (editable threshold)  
-    - `new_last5y` (built within last N years relative to sale year; editable)  
-    - `mid_age`  
-    - `unknown` (missing build year)
+## What changed vs v1
+- You can bundle multiple yearly Excel files inside the repository under `data/`
+- The UI lets the user select which years to analyze (no upload needed)
 
-## Install
+## Run locally
 ```bash
 pip install streamlit pandas openpyxl plotly numpy
-```
-
-## Run
-```bash
 streamlit run app.py
 ```
 
-## Notes for your example file
-The defaults match your Greek column names, including:
-- Ημερομηνία Συμβολαίου (sale date)
-- Έτος Κατασκευής (year built)
-- Eπιφάνεια Κύριων Χώρων (main sqm)
-- Επιφάνεια Βοηθητικών Χώρων (aux sqm, optional)
+## Deploy on Streamlit Cloud
+- Push `app.py`, `requirements.txt`, and the `data/` folder to GitHub
+- In Streamlit Cloud, set the main file to `app.py`
+
+## Repo structure
+```
+.
+├── app.py
+├── requirements.txt
+└── data
+    ├── mhtrwo-ax-met-ak-2017.xlsx
+    ├── ...
+    └── mhtrwo-ax-met-ak-2026.xlsx
+```
+
+## Note on storage
+If the dataset grows big, you can switch to a compact format (Parquet) later, but Excel-in-repo is simplest to start.

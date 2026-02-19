@@ -1,41 +1,18 @@
-import io
+import os
+import glob
 import pandas as pd
 import numpy as np
 import streamlit as st
 import plotly.express as px
 
 st.set_page_config(page_title="Greece House Sales Trends", layout="wide")
+st.title("🏠 Greece House Sales Trends")
+st.caption("Transaction activity analytics: number of sales, traded surface (sqm), and old/new mix over time.")
 
-st.title("🏠 Greece House Sales Trends (Excel → Trends)")
-st.caption("Upload an Excel file and explore transaction volume, traded surface, and old/new mix by month/quarter/year.")
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 
-with st.sidebar:
-    st.header("1) Upload")
-    uploaded = st.file_uploader("Excel file (.xlsx)", type=["xlsx"])
-    st.divider()
-    st.header("2) Time aggregation")
-    gran = st.radio("Group by", ["Month", "Quarter", "Year"], index=0, horizontal=False)
-    st.divider()
-    st.header("3) Columns (auto-detect, but editable)")
-    date_col_default = "Ημερομηνία Συμβολαίου"
-    built_col_default = "Έτος Κατασκευής"
-    area_main_default = "Eπιφάνεια Κύριων Χώρων (σε τ.μ.)"
-    area_aux_default = "Επιφάνεια Βοηθητικών Χώρων (σε τ.μ.)"
-
-    # These will be populated after load, but keep placeholders
-    date_col = st.text_input("Sale date column", value=date_col_default)
-    built_col = st.text_input("Year built column", value=built_col_default)
-    area_main_col = st.text_input("Main area column (sqm)", value=area_main_default)
-    area_aux_col = st.text_input("Aux area column (sqm) (optional)", value=area_aux_default)
-    include_aux = st.checkbox("Include auxiliary area in 'Total sqm traded'", value=False)
-
-    st.divider()
-    st.header("4) Age buckets")
-    pre_year = st.number_input("Old threshold (≤ year)", value=1990, step=1)
-    last_n = st.number_input("New = built within last N years (relative to sale year)", value=5, min_value=1, max_value=50, step=1)
-
+# ---------- Helpers ----------
 def try_parse_dates(s: pd.Series) -> pd.Series:
-    # Works for datetime, excel serials, strings
     if np.issubdtype(s.dtype, np.datetime64):
         return s
     return pd.to_datetime(s, errors="coerce")
@@ -43,9 +20,13 @@ def try_parse_dates(s: pd.Series) -> pd.Series:
 def compute_age_class(df: pd.DataFrame, date_col: str, built_col: str, pre_year: int, last_n: int) -> pd.Series:
     sale_year = df[date_col].dt.year
     built = pd.to_numeric(df[built_col], errors="coerce")
-    out = np.where(built.isna(), "unknown",
-          np.where(built <= pre_year, f"pre_{pre_year}",
-          np.where(built >= (sale_year - last_n), f"new_last{last_n}y", "mid_age")))
+    out = np.where(
+        built.isna(), "unknown",
+        np.where(
+            built <= pre_year, f"pre_{pre_year}",
+            np.where(built >= (sale_year - last_n), f"new_last{last_n}y", "mid_age"),
+        ),
+    )
     return pd.Series(out, index=df.index)
 
 def period_key(df: pd.DataFrame, date_col: str, gran: str) -> pd.Series:
@@ -55,41 +36,110 @@ def period_key(df: pd.DataFrame, date_col: str, gran: str) -> pd.Series:
         return df[date_col].dt.to_period("Q").astype(str)
     return df[date_col].dt.year.astype(str)
 
-if not uploaded:
-    st.info("Upload an Excel file to begin. Your example file looks compatible with the default column names shown in the sidebar.")
-    st.stop()
+@st.cache_data(show_spinner=False)
+def load_excel(path_or_bytes) -> pd.DataFrame:
+    return pd.read_excel(path_or_bytes)
 
-# Load
-try:
-    raw = pd.read_excel(uploaded)
-except Exception as e:
-    st.error(f"Could not read Excel: {e}")
+def discover_built_in_files():
+    paths = sorted(glob.glob(os.path.join(DATA_DIR, "*.xlsx")))
+    file_by_year = {}
+    for p in paths:
+        name = os.path.basename(p)
+        year = None
+        # Extract any 4-digit token in the filename
+        for token in name.replace(".xlsx", "").split("-"):
+            if token.isdigit() and len(token) == 4:
+                year = int(token)
+        if year is not None:
+            file_by_year[year] = p
+    years = sorted(file_by_year.keys())
+    return years, file_by_year
+
+# ---------- Sidebar ----------
+with st.sidebar:
+    st.header("1) Data")
+    mode = st.radio("Source", ["Built-in years (no upload)", "Upload Excel"], index=0)
+
+    years, file_by_year = discover_built_in_files()
+
+    uploaded = None
+    years_selected = None
+
+    if mode == "Built-in years (no upload)":
+        if not years:
+            st.warning("No built-in Excel files found. Add .xlsx files under ./data in the repo.")
+        default_years = years[-3:] if len(years) >= 3 else years
+        years_selected = st.multiselect("Select years", years, default=default_years)
+    else:
+        uploaded = st.file_uploader("Excel file (.xlsx)", type=["xlsx"])
+
+    st.divider()
+
+    st.header("2) Time aggregation")
+    gran = st.radio("Group by", ["Month", "Quarter", "Year"], index=0)
+
+    st.divider()
+
+    st.header("3) Columns (editable)")
+    date_col = st.text_input("Sale date column", value="Ημερομηνία Συμβολαίου")
+    built_col = st.text_input("Year built column", value="Έτος Κατασκευής")
+    area_main_col = st.text_input("Main area (sqm)", value="Eπιφάνεια Κύριων Χώρων (σε τ.μ.)")
+    area_aux_col = st.text_input("Aux area (sqm) (optional)", value="Επιφάνεια Βοηθητικών Χώρων (σε τ.μ.)")
+    include_aux = st.checkbox("Include auxiliary area in total sqm", value=False)
+
+    st.divider()
+
+    st.header("4) Age buckets")
+    pre_year = st.number_input("Old threshold (≤ year)", value=1990, step=1)
+    last_n = st.number_input("New = within last N years (relative to sale year)", value=5, min_value=1, max_value=50, step=1)
+
+# ---------- Load data ----------
+dfs = []
+
+if mode == "Built-in years (no upload)":
+    if not years_selected:
+        st.info("Select at least one year from the sidebar.")
+        st.stop()
+    for y in years_selected:
+        p = file_by_year.get(y)
+        if not p:
+            continue
+        d = load_excel(p)
+        d["_source_year_file"] = y
+        dfs.append(d)
+else:
+    if not uploaded:
+        st.info("Upload an Excel file to begin.")
+        st.stop()
+    d = load_excel(uploaded)
+    dfs.append(d)
+
+raw = pd.concat(dfs, ignore_index=True)
+
+# ---------- Validate columns ----------
+required = [date_col, built_col, area_main_col]
+missing = [c for c in required if c not in raw.columns]
+if missing:
+    st.error("Missing required columns: " + ", ".join(missing))
+    st.write("Detected columns:", list(raw.columns))
     st.stop()
 
 df = raw.copy()
-
-missing = [c for c in [date_col, built_col, area_main_col] if c not in df.columns]
-if missing:
-    st.error("Missing required columns: " + ", ".join(missing) + "\n\nUse the sidebar to set the correct column names.")
-    st.write("Detected columns:", list(df.columns))
-    st.stop()
-
 df[date_col] = try_parse_dates(df[date_col])
 df = df.dropna(subset=[date_col])
 
-# Total sqm traded
 main_area = pd.to_numeric(df[area_main_col], errors="coerce").fillna(0.0)
+aux_area = 0.0
 if include_aux and (area_aux_col in df.columns):
     aux_area = pd.to_numeric(df[area_aux_col], errors="coerce").fillna(0.0)
-else:
-    aux_area = 0.0
 df["total_sqm"] = main_area + aux_area
 
-# Age class
 df["age_class"] = compute_age_class(df, date_col, built_col, pre_year=pre_year, last_n=last_n)
+df["period"] = period_key(df, date_col, gran)
 
-# Optional filters (auto-detect common geo columns)
-geo_cols = [c for c in ["Νομαρχία", "Δήμος Καλλικράτη", "Δημοτικό ή Κοινοτικό Διαμέρισμα", "Κατηγορία Ακινήτου"] if c in df.columns]
+# ---------- Optional filters ----------
+geo_candidates = ["Νομαρχία", "Δήμος Καλλικράτη", "Δημοτικό ή Κοινοτικό Διαμέρισμα", "Κατηγορία Ακινήτου"]
+geo_cols = [c for c in geo_candidates if c in df.columns]
 
 with st.sidebar:
     st.divider()
@@ -101,37 +151,36 @@ with st.sidebar:
         if sel != "(all)":
             filters[c] = sel
 
-# Apply filters
 for c, v in filters.items():
     df = df[df[c] == v]
 
-df["period"] = period_key(df, date_col, gran)
-
-# Aggregate core metrics
+# ---------- Aggregations ----------
 agg = df.groupby("period", as_index=False).agg(
     sales=("period", "size"),
     traded_sqm=("total_sqm", "sum"),
 )
 
-# Age mix counts
 age = df.groupby(["period", "age_class"]).size().reset_index(name="count")
 age_pivot = age.pivot(index="period", columns="age_class", values="count").fillna(0).astype(int).reset_index()
 
-# Join
 out = agg.merge(age_pivot, on="period", how="left").fillna(0)
 
-# Percent mix for age classes
 age_cols = [c for c in out.columns if c not in ["period", "sales", "traded_sqm"]]
+pct_long = None
 if age_cols:
-    pct = out[age_cols].div(out["sales"].replace(0, np.nan), axis=0) * 100
-    pct = pct.fillna(0)
-    pct.columns = [f"{c}_pct" for c in pct.columns]
-    out_pct = pd.concat([out[["period", "sales", "traded_sqm"]], pct], axis=1)
-else:
-    out_pct = out[["period", "sales", "traded_sqm"]].copy()
+    out_pct = out.copy()
+    for c in age_cols:
+        out_pct[c] = (out_pct[c] / out_pct["sales"].replace(0, np.nan) * 100).fillna(0)
 
-# Layout
-colA, colB = st.columns([1.2, 1])
+    pct_long = out_pct.melt(id_vars=["period"], value_vars=age_cols, var_name="age_class", value_name="pct")
+
+# ---------- UI ----------
+k1, k2, k3 = st.columns(3)
+k1.metric("Rows loaded", f"{len(df):,}")
+k2.metric("Total sales", f"{int(df.shape[0]):,}")
+k3.metric("Total traded sqm", f"{df['total_sqm'].sum():,.0f}")
+
+colA, colB = st.columns([1.25, 1])
 
 with colA:
     st.subheader("📌 Aggregated table")
@@ -151,13 +200,22 @@ with colB:
 
     if age_cols:
         age_long = out.melt(id_vars=["period"], value_vars=age_cols, var_name="age_class", value_name="count")
-        fig3 = px.area(age_long, x="period", y="count", color="age_class", title="Age mix (counts)", groupnorm=None)
+        fig3 = px.area(age_long, x="period", y="count", color="age_class", title="Age mix (counts)")
         st.plotly_chart(fig3, use_container_width=True)
 
-        pct_cols = [c for c in out_pct.columns if c.endswith("_pct")]
-        pct_long = out_pct.melt(id_vars=["period"], value_vars=pct_cols, var_name="age_class", value_name="pct")
-        pct_long["age_class"] = pct_long["age_class"].str.replace("_pct$", "", regex=True)
-        fig4 = px.area(pct_long, x="period", y="pct", color="age_class", title="Age mix (% of sales)", groupnorm=None)
+        fig4 = px.area(pct_long, x="period", y="pct", color="age_class", title="Age mix (% of sales)")
         st.plotly_chart(fig4, use_container_width=True)
 
-st.caption("Tip: change Month/Quarter/Year in the sidebar, and use filters (Nomarchy/Municipality/Category) to drill down.")
+with st.expander("Data notes / assumptions", expanded=False):
+    st.markdown(
+        f"""
+- **Age buckets** are dynamic relative to the sale year:
+  - `pre_{int(pre_year)}`: built year ≤ {int(pre_year)}
+  - `new_last{int(last_n)}y`: built year ≥ sale_year − {int(last_n)}
+  - `mid_age`: everything in between
+  - `unknown`: missing/invalid build year
+- **Total sqm traded** = main area + (optional) auxiliary area (controlled in sidebar).
+"""
+    )
+
+st.caption("Tip: If you deploy this to Streamlit Cloud, the built-in yearly files live in the repo under `data/`.")
